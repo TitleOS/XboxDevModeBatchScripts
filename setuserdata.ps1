@@ -4,13 +4,10 @@ This script populates a local Xbox console user with fake XBL metadata.
 
 
 .DESCRIPTION
-The script takes a user-id "uid", system account name "winuser" and "email" parameter and populates metadata.
+The script takes a user-id "uid", "email", "gamertag", "firstname" and "lastname" parameter and populates metadata.
 
 .PARAMETER uid
 The user-id received from user-creation.
-
-.PARAMETER winuser
-The username from the windows accounts, f.e. "UserMgr0"
 
 .PARAMETER email
 The email address to populate for the user.
@@ -25,7 +22,7 @@ The first name to assign to the user.
 The last name to assign to the user.
 
 .EXAMPLE
-.\setuserdata.ps1 -uid 16 -winuser "UserMgr0" -email "john@doe.com" -gamertag "xXJohnXx" -firstname "John" -lastname "Doe" 
+D:\setuserdata.ps1 -uid 18 -email "john@xboxtest.com" -gamertag "JohnGt" -firstname "John" -lastname "Doe" 
 This example demonstrates how to call the script with the required parameters.
 
 .NOTES
@@ -38,8 +35,6 @@ param (
     [Parameter(Mandatory=$true)]
     [int]$uid,
     [Parameter(Mandatory=$true)]
-    [string]$winuser,
-    [Parameter(Mandatory=$true)]
     [mailAddress]$email,
     [Parameter(Mandatory=$true)]
     [string]$gamertag,
@@ -49,9 +44,6 @@ param (
     [string]$lastname
 )
 
-Set-StrictMode -Version latest
-$ErrorActionPreference = "Stop"
-
 
 $code = @'
 using System;
@@ -59,11 +51,11 @@ using System.Runtime.InteropServices;
 
 public class RegistryInterop
 {
-    [DllImport("advapi32.dll", SetLastError = true)]
-    public static extern int RegLoadKey(uint hKey, string lpSubKey, string lpFile);
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError = true)]
+    public static extern int RegLoadKeyW(IntPtr hKey, string lpSubKey, string lpFile);
 
-    [DllImport("advapi32.dll", SetLastError = true)]
-    public static extern int RegUnLoadKey(uint hKey, string lpSubKey);
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError = true)]
+    public static extern int RegUnLoadKeyW(IntPtr hKey, string lpSubKey);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern int OpenProcessToken(IntPtr ProcessHandle, int DesiredAccess, ref IntPtr TokenHandle);
@@ -93,7 +85,9 @@ public class RegistryInterop
     }
 
 	const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
-	const int SE_PRIVILEGE_ENABLED = 0x00000002;
+	const uint SE_PRIVILEGE_DISABLED = 0x00000000;
+	const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+	const uint SE_PRIVILEGE_REMOVED = 0x00000004;
 	const int TOKEN_QUERY = 0x00000008;
 
 	const uint HCR =  0x80000000;
@@ -104,48 +98,98 @@ public class RegistryInterop
 	static string SE_BACKUP_NAME = "SeBackupPrivilege";
 	static string SE_RESTORE_NAME = "SeRestorePrivilege";
 
+  static LUID _restoreLuid = new LUID();
+  static LUID _backupLuid = new LUID();
+        
+	static IntPtr _processToken = IntPtr.Zero;
+	static bool _initialized = false;
+
     static RegistryInterop()
     {
-        LUID RestoreLuid = new LUID();
-        LUID BackupLuid = new LUID();
+        int retval = OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref _processToken);
+        if (retval == 0) {
+          Console.WriteLine("OpenProcess Error: {0}", retval);
+          return;
+        }
+        
+        retval = LookupPrivilegeValue(null, SE_RESTORE_NAME, ref _restoreLuid);
+        if (retval == 0) {
+          Console.WriteLine("LookupPrivs: SE_RESTORE_NAME - Error: {0}", Marshal.GetLastWin32Error());
+          return; 
+        }
+        retval = LookupPrivilegeValue(null, SE_BACKUP_NAME, ref _backupLuid);
+        if (retval == 0) {
+	        Console.WriteLine("LookupPrivs: SE_BACKUP_NAME - Error: {0}", Marshal.GetLastWin32Error());
+          return;
+        }
+        _initialized = true;
+    }
+    
+    public static void AdjustPrivs(bool enable)
+    {
+    	if (!_initialized) {
+    	  Console.WriteLine("[-] Precondition failed, cannot adjust privs");
+    	  return;
+    	}
 
-        TOKEN_PRIVILEGES TP = new TOKEN_PRIVILEGES();
-        TOKEN_PRIVILEGES TP2 = new TOKEN_PRIVILEGES();
+      TOKEN_PRIVILEGES TP = new TOKEN_PRIVILEGES();
+      TOKEN_PRIVILEGES TP2 = new TOKEN_PRIVILEGES();
 
-        IntPtr token = IntPtr.Zero;
-        int retval = OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref token);
-        retval = LookupPrivilegeValue(null, SE_RESTORE_NAME, ref RestoreLuid);
-        retval = LookupPrivilegeValue(null, SE_BACKUP_NAME, ref BackupLuid);
+      TP.PrivilegeCount = 1;
+      TP.Attributes = enable ? SE_PRIVILEGE_ENABLED: SE_PRIVILEGE_DISABLED;
+      TP.Luid = _restoreLuid;
+      TP2.PrivilegeCount = 1;
+      TP2.Attributes = enable ? SE_PRIVILEGE_ENABLED: SE_PRIVILEGE_DISABLED;
+      TP2.Luid = _backupLuid;
 
-        TP.PrivilegeCount = 1;
-        TP.Attributes = SE_PRIVILEGE_ENABLED;
-        TP.Luid = RestoreLuid;
-        TP2.PrivilegeCount = 1;
-        TP2.Attributes = SE_PRIVILEGE_ENABLED;
-        TP2.Luid = BackupLuid;
-
-        retval = AdjustTokenPrivileges(token, false, ref TP, 0, IntPtr.Zero, IntPtr.Zero);
-        retval = AdjustTokenPrivileges(token, false, ref TP2, 0, IntPtr.Zero, IntPtr.Zero);
+      int retval = AdjustTokenPrivileges(_processToken, false, ref TP, 0, IntPtr.Zero, IntPtr.Zero);
+      if (retval == 0) {
+        Console.WriteLine("AdjustTokenPrivs: SE_RESTORE - Error: {0}", Marshal.GetLastWin32Error());
+        return;
+      }
+      retval = AdjustTokenPrivileges(_processToken, false, ref TP2, 0, IntPtr.Zero, IntPtr.Zero);
+      if (retval == 0)
+        Console.WriteLine("AdjustTokenPrivs: SE_BACKUP - Error: {0}", Marshal.GetLastWin32Error());
     }
 
     public static int LoadHive(string targetHiveName, string hiveFilePath)
     {
-        return RegLoadKey(HKLM, targetHiveName, hiveFilePath);
+        return RegLoadKeyW(new IntPtr(HKLM), targetHiveName, hiveFilePath);
     }
 
     public static int UnloadHive(string targetHiveName)
     {
-        return RegUnLoadKey(HKLM, targetHiveName);
+        return RegUnLoadKeyW(new IntPtr(HKLM), targetHiveName);
     }
 }
 '@
 
+Write-Host "[+] Checking for NTUSER.DAT in current directory"
+if (!(Test-Path "NTUSER.DAT"))
+{
+  Write-Host "[-] File NTUSER.DAT does not exist!"
+  Exit 1
+}
+
 Write-Host "[+] Loading managed code"
 Add-Type -TypeDefinition $code
 
+Write-Host "[+] Acquiring token privileges"
+[RegistryInterop]::AdjustPrivs($true)
+
 # Load Hive into HKLM
-[RegistryInterop]::LoadHive("USR", "U:\Users\$winuser\NTUSER.DAT")
 # reg.exe LOAD HKLM\USR U:\Users\$winuser\NTUSER.DAT
+$hiveFile = "NTUSER.DAT"
+#$hiveFile = "U:\Users\$winuser\NTUSER.DAT"
+Write-Host "[*] Attempting to load Hive: $hiveFile"
+$ret = [RegistryInterop]::LoadHive("USR", $hiveFile)
+if ( $ret -ne 0 )
+{
+  Write-Host "[-] Failed to mount user registry hive, code $ret"
+  Exit 1
+}
+
+Write-Host "[-] User Hive mounted to HKLM:\USR"
 
 # Set XboxLive metadata
 New-Item -Path "HKLM:\USR\Software\Microsoft\XboxLive" -Force
@@ -154,10 +198,6 @@ Set-ItemProperty -Path "HKLM:\USR\Software\Microsoft\XboxLive" -Name "Xuid" -Val
 Set-ItemProperty -Path "HKLM:\USR\Software\Microsoft\XboxLive" -Name "UserName" -Value $email -Type String
 Set-ItemProperty -Path "HKLM:\USR\Software\Microsoft\XboxLive" -Name "Gamertag" -Value $gamertag -Type String
 Set-ItemProperty -Path "HKLM:\USR\Software\Microsoft\XboxLive" -Name "AgeGroup" -Value "Adult" -Type String
-
-# Unload Hive from HKLM
-[RegistryInterop]::UnloadHive("USR")
-#reg.exe UNLOAD HKLM\USR
 
 # Additional registry operations
 New-Item -Path "HKLM:\OSDATA\CurrentControlSet\Control\UserManager\Users\$uid" -Force
@@ -170,6 +210,7 @@ Set-ItemProperty -Path "HKLM:\OSDATA\CurrentControlSet\Control\UserManager\Users
 Set-ItemProperty -Path "HKLM:\OSDATA\CurrentControlSet\Control\UserManager\Users\$uid" -Name "SignInCaller" -Value 5 -Type DWord
 Set-ItemProperty -Path "HKLM:\OSDATA\CurrentControlSet\Control\UserManager\Users\$uid" -Name "SignInTimestamp" -Value 0x1CF068469F2C000 -Type QWord
 
+New-Item -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid" -Force
 Set-ItemProperty -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid" -Name "ACL Set" -Type DWord -Value 0x1
 Set-ItemProperty -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid" -Name "xuid" -Type String -Value 2535401234567890
 Set-ItemProperty -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid" -Name "DoNotDisturbEnabled" -Type DWord -Value 0x0
@@ -231,3 +272,15 @@ Set-ItemProperty -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$ui
 Set-ItemProperty -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid" -Name "requirePasskeyForSignIn" -Type DWord -Value 0x0
 Set-ItemProperty -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid" -Name "userKey" -Type String -Value 0000000000000000000000000000000000000000000000000000000000000000
 New-Item -Path "HKLM:\OSDATA\Software\Microsoft\Durango\UserSettings\$uid\TitleExceptions" -Force
+
+# Unload Hive from HKLM
+#reg.exe UNLOAD HKLM\USR
+$ret = [RegistryInterop]::UnloadHive("USR")
+if ( $ret -ne 0 )
+{
+  Write-Host "[-] Failed to unload user registry hive"
+}
+
+Write-Host "[+] Restoring token privileges"
+[RegistryInterop]::AdjustPrivs($false)
+
